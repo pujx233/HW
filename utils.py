@@ -1,143 +1,102 @@
-#! -*- coding: utf-8 -*-
-# 数据读取函数
-
-from tqdm import tqdm
-import csv
-import numpy as np
-import scipy.stats
-from bert4keras.backend import keras, K
-from bert4keras.models import build_transformer_model
+from bert4keras.backend import keras, set_gelu, K
 from bert4keras.tokenizers import Tokenizer
+from bert4keras.snippets import sequence_padding, DataGenerator
 from bert4keras.snippets import open
-from bert4keras.snippets import sequence_padding
-from keras.models import Model
-
-
-def load_data_csv(filename, headers):
-    result = []
-    with open(filename, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f, delimiter=',', quotechar='"')
-        for row in reader:
-            target = []
-            for header in headers:
-                target.append(row[header])
-            result.append(tuple(target))
-    return result
+from sklearn.metrics import precision_score, recall_score, f1_score
+from configs import *
 
 
 def load_data(filename):
-    """加载数据（带标签）
-    单条格式：(文本1, 文本2, 标签)
-    """
     D = []
     with open(filename, encoding='utf-8') as f:
         for l in f:
-            l = l.strip().split('\t')
-            if len(l) == 3:
-                D.append((l[0], l[1], float(l[2])))
+            text1, text2, label = l.strip().split('\t')
+            D.append((text1, text2, int(label)))
     return D
 
 
-def get_tokenizer(dict_path, pre_tokenize=None):
-    """建立分词器
+def evaluate(data, model, is_print=False):
+    index = 1
+    total, right = 0., 0.
+    all_pred, all_true = [], []
+    for x_true, y_true in data:
+        y_pred = model.predict(x_true).argmax(axis=1)
+        y_true = y_true[:, 0]
+        total += len(y_true)
+        right += (y_true == y_pred).sum()
+        if not is_print:
+            continue
+        all_pred.extend(y_pred)
+        all_true.extend(y_true)
+        i = 0
+        for y in y_pred:
+            print('index:', index, '\tresult:', y, '\tgt:', y_true[i])
+            index += 1
+            i += 1
+
+    if is_print:
+        print('------Weighted------')
+        print('Weighted precision: %.4f' % precision_score(
+            all_true, all_pred, average='weighted'))
+        print('Weighted recall: %.4f' % recall_score(
+            all_true, all_pred, average='weighted'))
+        print('Weighted f1: %.4f' % f1_score(
+            all_true, all_pred, average='weighted'))
+
+        print('------Macro------')
+        print('Macro precision: %.4f' % precision_score(all_true, all_pred, average='macro'))
+        print('Macro recall: %.4f' % recall_score(all_true, all_pred, average='macro'))
+        print('Macro f1: %.4f' % f1_score(all_true, all_pred, average='macro'))
+
+        print('------Micro------')
+        print('Micro precision: %.4f' % precision_score(all_true, all_pred, average='micro'))
+        print('Micro recall: %.4f' % recall_score(all_true, all_pred, average='micro'))
+        print('Micro f1: %.4f' % f1_score(all_true, all_pred, average='micro'))
+        print('\n')
+
+    return right / total
+
+
+class data_generator(DataGenerator):
+    def __init__(self, data, batch_size, dict_path):
+        super().__init__(data, batch_size)
+        self.tokenizer = Tokenizer(dict_path, do_lower_case=True)
+
+
+    def __iter__(self, random=False):
+        batch_token_ids, batch_segment_ids, batch_labels = [], [], []
+        for is_end, (text1, text2, label) in self.sample(random):
+            token_ids, segment_ids = self.tokenizer.encode(
+                text1, text2, maxlen=maxlen
+            )
+            batch_token_ids.append(token_ids)
+            batch_segment_ids.append(segment_ids)
+            batch_labels.append([label])
+            if len(batch_token_ids) == self.batch_size or is_end:
+                batch_token_ids = sequence_padding(batch_token_ids)
+                batch_segment_ids = sequence_padding(batch_segment_ids)
+                batch_labels = sequence_padding(batch_labels)
+                yield [batch_token_ids, batch_segment_ids], batch_labels
+                batch_token_ids, batch_segment_ids, batch_labels = [], [], []
+
+class Evaluator(keras.callbacks.Callback):
+    """评估与保存
     """
-    return Tokenizer(dict_path, do_lower_case=True, pre_tokenize=pre_tokenize)
 
+    def __init__(self, model, valid_generator, test_generator=None):
+        self.best_val_acc = 0.
+        self.model = model
+        self.valid_generator = valid_generator
+        self.test_generator = test_generator
 
-def get_encoder(
-    config_path, checkpoint_path, model='bert', pooling='first-last-avg'
-):
-    """建立编码器
-    """
-    assert pooling in ['first-last-avg', 'last-avg', 'cls', 'pooler']
+    def on_epoch_end(self, epoch, logs=None):
+        val_acc = evaluate(self.valid_generator, self.model)
+        if val_acc > self.best_val_acc:
+            self.best_val_acc = val_acc
+            self.model.save_weights(weights_path)
+        if self.test_generator is not None:
+            test_acc = evaluate(self.test_generator, self.model)
+            print(u'val_acc: %.5f, best_val_acc: %.5f, test_acc: %.5f\n' % (val_acc, self.best_val_acc, test_acc))
+        else:
+            print(u'val_acc: %.5f, best_val_acc: %.5f\n' % (val_acc, self.best_val_acc))
 
-    if pooling == 'pooler':
-        bert = build_transformer_model(
-            config_path, checkpoint_path, model=model, with_pool='linear'
-        )
-    else:
-        bert = build_transformer_model(
-            config_path, checkpoint_path, model=model
-        )
-
-    outputs, count = [], 0
-    while True:
-        try:
-            output = bert.get_layer(
-                'Transformer-%d-FeedForward-Norm' % count
-            ).output
-            outputs.append(output)
-            count += 1
-        except:
-            break
-
-    if pooling == 'first-last-avg':
-        outputs = [
-            keras.layers.GlobalAveragePooling1D()(outputs[0]),
-            keras.layers.GlobalAveragePooling1D()(outputs[-1])
-        ]
-        output = keras.layers.Average()(outputs)
-    elif pooling == 'last-avg':
-        output = keras.layers.GlobalAveragePooling1D()(outputs[-1])
-    elif pooling == 'cls':
-        output = keras.layers.Lambda(lambda x: x[:, 0])(outputs[-1])
-    elif pooling == 'pooler':
-        output = bert.output
-
-    # 最后的编码器
-    encoder = Model(bert.inputs, output)
-    return encoder
-
-
-def convert_to_ids(data, tokenizer, maxlen=64):
-    """转换文本数据为id形式
-    """
-    a_token_ids, b_token_ids = [], []
-    for d in tqdm(data):
-        token_ids = tokenizer.encode(d[0], maxlen=maxlen)[0]
-        a_token_ids.append(token_ids)
-        token_ids = tokenizer.encode(d[-1], maxlen=maxlen)[0]
-        b_token_ids.append(token_ids)
-    a_token_ids = sequence_padding(a_token_ids)
-    b_token_ids = sequence_padding(b_token_ids)
-    return a_token_ids, b_token_ids
-
-
-def convert_to_vecs(data, tokenizer, encoder, maxlen=64):
-    """转换文本数据为向量形式
-    """
-    a_token_ids, b_token_ids = convert_to_ids(data, tokenizer, maxlen)
-    a_vecs = encoder.predict([a_token_ids,
-                              np.zeros_like(a_token_ids)],
-                             verbose=True)
-    b_vecs = encoder.predict([b_token_ids,
-                              np.zeros_like(b_token_ids)],
-                             verbose=True)
-    return a_vecs, b_vecs
-
-
-def compute_kernel_bias(vecs):
-    """计算kernel和bias
-    最后的变换：y = (x + bias).dot(kernel)
-    """
-    vecs = np.concatenate(vecs, axis=0)
-    mu = vecs.mean(axis=0, keepdims=True)
-    cov = np.cov(vecs.T)
-    u, s, vh = np.linalg.svd(cov)
-    W = np.dot(u, np.diag(1 / np.sqrt(s)))
-    return W, -mu
-
-
-def transform_and_normalize(vecs, kernel=None, bias=None):
-    """应用变换，然后标准化
-    """
-    if not (kernel is None or bias is None):
-        vecs = (vecs + bias).dot(kernel)
-    norms = (vecs**2).sum(axis=1, keepdims=True)**0.5
-    return vecs / np.clip(norms, 1e-8, np.inf)
-
-
-def compute_corrcoef(x, y):
-    """Spearman相关系数
-    """
-    return scipy.stats.spearmanr(x, y).correlation

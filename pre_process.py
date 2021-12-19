@@ -12,22 +12,6 @@ from dataset.utils import utils
 xlrd.xlsx.ensure_elementtree_imported(False, None)
 xlrd.xlsx.Element_has_iter = True
 
-# 需要跑下列哪些操作
-FLAGS = {
-    # xlsx转换为csv
-    'trans2csv': False,
-    # 提取所需列
-    'cols': False,
-    # 提取江苏省地名用于去噪
-    'place_names': False,
-    # 去除单位的地名前缀，且分词，提取出重点
-    'eliminate': False,
-    # 分词
-    'tokenize': False,
-    # 每一列取频率高的几个token，默认不多于3个
-    'filter': True,
-}
-
 # 原始数据路径，需指定原始excel文件路径，需放在dataset目录下
 raw_excel_filename = 'dataset/pre/raw.xlsx'
 raw_filename = 'dataset/pre/raw.csv'
@@ -41,7 +25,6 @@ place_headers = ['full_name', 'short_name']
 selected_cols_filename = 'dataset/pre/selected_cols.csv'
 
 # 地名数据，选出江苏省县市地名，用于去除单位的地名前缀
-place_set_filename = 'dataset/pre/place-set.json'
 target_place_name_filename = 'dataset/pre/target-place-names.csv'
 name_eliminated_filename = 'dataset/pre/name-eliminated.csv'
 
@@ -49,30 +32,88 @@ name_eliminated_filename = 'dataset/pre/name-eliminated.csv'
 def run():
     jieba.load_userdict("dataset/utils/ext.dic")
 
-    if FLAGS['trans2csv']:
-        xlsx_to_csv()
-        print('[info] xlsx to csv done')
+    train_to_csv()
+    test_to_csv()
+    print('[info] xlsx to csv done')
 
-    if FLAGS['cols']:
-        select_cols(select_headers)
-        print('[info] select columns done')
+    select_cols(select_headers)
+    print('[info] select columns done')
 
-    if FLAGS['place_names']:
-        get_place_names()
-        print('[info] get place name done')
+    eliminate_place_names(selected_cols_filename, name_eliminated_filename, select_headers)
+    eliminate_place_names('dataset/pre/raw.1.csv', 'dataset/pre/el.valid.csv', ['A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6'])
+    print('[info] eliminate place names done')
+    
+    generate_train()
+    generate_test()
+    print('[info] data formatting done')
 
-    if FLAGS['eliminate']:
-        eliminate_place_names()
-        print('[info] eliminate place names done')
 
-    tokenized_prefix = 'dataset/pre/tokenized_'
-    if FLAGS['tokenize']:
-        tokenize(name_eliminated_filename, 'A4', tokenized_prefix + 'A4.csv')
-        tokenize(tokenized_prefix + 'A4.csv', 'A2', tokenized_prefix + 'A2.csv')
+def generate_train():
+    items = get_items('dataset/pre/name-eliminated.csv')
+    a2 = {}
+    a4 = {}
+    for item in items:
+        a2[item['A5']] = a2.get(item['A5'], set())
+        a2[item['A5']].add((item['A2'], '1'))
+        a4[item['A5']] = a4.get(item['A5'], set())
+        a4[item['A5']].add((item['A4'], '1'))
+    
+    for key1 in a2.keys():
+        for key2 in a2.keys():
+            if key1 == key2:
+                continue
+            count = 0
+            for value in a2[key2]:
+                if (value[0], '1') not in a2[key1]:
+                    a2[key1].add((value[0], '0'))
+                    count += 1
+                if count >= 2:
+                    break
 
-    if FLAGS['filter']:
-        filter(tokenized_prefix + 'A2.csv', 'A4', 3)
-        filter('dataset/pre/new-A4.csv', 'A2', 3)
+    for key1 in a4.keys():
+        for key2 in a4.keys():
+            if key1 == key2:
+                continue
+            count = 0
+            for value in a4[key2]:
+                if (value[0], '1') not in a4[key1]:
+                    a4[key1].add((value[0], '0'))
+                    count += 1
+
+    with open('dataset/pre/zw.train.data', 'w') as f:
+        for key, value in a2.items():
+            for v in value:
+                f.write(key + '\t' + v[0] + '\t' + v[1] + '\n')
+
+    with open('dataset/pre/zw.a4.train.data', 'w') as f:
+        for key, value in a4.items():
+            for v in value:
+                f.write(key + '\t' + v[0] + '\t' + v[1] + '\n')
+
+
+def generate_test():
+    items = get_items('dataset/pre/el.valid.csv')
+    a2 = []
+    a4 = []
+    for item in items:
+        is_nom = 1
+        is_nom = 0 if item['A0'] == 'A2' else 1
+        a2_item = ('%s\t%s\t%d\n' % (item['A5'], item['A2'], is_nom))
+        a4_item = ('%s\t%s\t%d\n' % (item['A5'], item['A4'], 1))
+        a2.append(a2_item)
+        a4.append(a4_item)
+
+    with open('dataset/pre/zw.valid.data', 'w') as f:
+        for k in a2:
+            f.write(k)
+
+    with open('dataset/pre/zw.test.data', 'w') as f:
+        for k in a2:
+            f.write(k)
+
+    with open('dataset/pre/zw.a4.valid.data', 'w') as f:
+        for k in a2:
+            f.write(k)
 
 
 def get_items(filename, headers=None):
@@ -91,14 +132,6 @@ def get_items(filename, headers=None):
     return result
 
 
-def get_ids():
-    ids = get_items('dataset/pre/name-eliminated.csv', ['A0'])
-    lst = []
-    for item in ids:
-        lst.append(item['A0'])
-    return lst
-
-
 def write_to_csv(filename, headers, src):
     with open(filename, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=headers)
@@ -107,24 +140,12 @@ def write_to_csv(filename, headers, src):
             writer.writerow(row)
 
 
-def get_place_names():
-    names = []
-    with open(place_set_filename, 'r') as f:
-        data = json.load(f)
-        for item in data:
-            if item['code'].startswith('32'):
-                names.append(
-                    {place_headers[0]: item['name'], place_headers[1]: item['name'][:-1]})
-    write_to_csv(target_place_name_filename, place_headers, names)
-
-
-def eliminate_place_names():
-    selected_cols = get_items(selected_cols_filename)
+def eliminate_place_names(src, dest_path, h):
+    selected_cols = get_items(src)
     place_names = get_items(target_place_name_filename)
 
     shorts = {}
     units = []
-    # A6
     with open('dataset/pre/unit-dict.txt', 'r', encoding='utf-8') as f:
         for line in f:
             if line.startswith('#'):
@@ -187,7 +208,7 @@ def eliminate_place_names():
         index += 1
 
     print('[info] total row count:', len(selected_cols))
-    write_to_csv(name_eliminated_filename, select_headers, selected_cols)
+    write_to_csv(dest_path, h, selected_cols)
 
 
 def select_cols(headers):
@@ -195,7 +216,7 @@ def select_cols(headers):
     write_to_csv(selected_cols_filename, select_headers, target)
 
 
-def xlsx_to_csv():
+def train_to_csv():
     workbook = xlrd.open_workbook(raw_excel_filename)
     table = workbook.sheet_by_index(1)
     with open(raw_filename, 'w', newline='', encoding='utf-8') as f:
@@ -209,132 +230,18 @@ def xlsx_to_csv():
             writer.writerow(dict(zip(all_headers, row_value)))
 
 
-def read_xlsx():
+def test_to_csv():
     workbook = xlrd.open_workbook(raw_excel_filename)
     table = workbook.sheet_by_index(0)
-    rows = []
-    for row_num in range(3, table.nrows - 3):
-        row_value = table.row_values(row_num)
-        row = [row_value[3], row_value[6]]
-        if row_value[0] == 'A2':
-            row.append('0')
-        else:
-            row.append('1')
-        rows.append(row)
-
-    idx = 0
-    for row in rows:
-        unit = row[1]
-        new_unit = ''
-        for ch in unit:
-            if not (u'\u0041' <= ch <= u'\u005a') and not (u'\u0061' <= ch <= u'\u007a') and ch not in ['省', '市', '县', '区', '镇', '乡', '街道', '村']:
-                new_unit += ch
-        rows[idx][1] = new_unit
-        idx += 1
-
-    dic = {}
-    labels = []
-    for row in rows:
-        if row[1] in dic.keys():
-            if row[0] not in dic[row[1]]:
-                dic[row[1]].append(row[0])
-                labels.append(row[2])
-        else:
-            dic[row[1]] = [row[0]]
-            labels.append(row[2])
-
-    with open('dataset/pre/test.data', 'w', encoding='utf-8') as f:
-        index = 0
-        for key, value in dic.items():
-            for item in value:
-                f.write(key + '\t' + item + '\t' + labels[index] + '\n')
-                index += 1
-
-    return rows
-
-
-def set_stop_words(filename):
-    result = []
-    with open(filename, 'r', encoding='utf-8') as f:
-        f.readline()
-        for line in f:
-            result.extend(line.strip().split(','))
-
-    with open('utils/new_stopwords.txt', 'a', encoding='utf-8') as f:
-        for item in result:
-            f.write(item + '\n')
-
-
-def summarize_col(filename, col):
-    items = get_items(filename, [col])
-    dic = {}
-    for item in items:
-        if item[col] in dic.keys():
-            dic[item[col]] += 1
-        else:
-            dic[item[col]] = 1
-    dic = sorted(dic.items(), key=lambda d: d[1], reverse=True)
-    with open('dataset/pre/' + col + '.txt', 'w', encoding='utf-8') as f:
-        for key, value in dic:
-            print('%s: %d' % (key, value))
-            f.write(key + '\n')
-
-
-def tokenize(f, col, dest):
-    probs = []
-    items = get_items(f)
-    index = 0
-    for item in items:
-        seg_list = seg.lcut(item[col])
-        words = []
-        for pair in seg_list:
-            if (pair.flag == 'n' or pair.flag == 'nz' or pair.flag == 'vn' or pair.flag == 'an' or pair.flag == 'nr' or pair.flag == 'nt') and len(pair.word) > 1:
-                words.append(pair.word)
-        words = utils.filter_stop(words)
-        if len(words) == 0:
-            words = [item[col]]
-            probs.append((item['A2'], item['A4'], item['A5'], seg_list))
-        items[index][col] = ' '.join(words)
-        index += 1
-
-    write_to_csv(dest, select_headers, items)
-
-    print('prob:', len(probs))
-    for prob in probs:
-        print(prob)
-
-
-def filter(f, head, limit=3):
-    items = get_items(f, ['A2', 'A4', 'A5'])
-    dic_a4 = {}
-    total_words = 0
-    for item in items:
-        dic_a4[item['A5']] = dic_a4.get(item['A5'], {})
-        words = item[head].split(' ')
-        for word in words:
-            total_words += 1
-            dic_a4[item['A5']][word] = dic_a4[item['A5']].get(word, 0) + 1
-        dic_a4[item['A5']]['wc'] = dic_a4[item['A5']].get('wc', 0) + len(words)
-
-    for key, value in dic_a4.items():
-        dic_a4[key] = dict(
-            sorted(value.items(), key=lambda d: d[1], reverse=True))
-
-    index = 0
-    for item in items:
-        words = item[head].split(' ')
-        new_words = []
-        wc = 0
-        for word in dic_a4[item['A5']].keys():
-            if word in words:
-                new_words.append(word)
-                wc += 1
-                if wc >= limit:
-                    break
-        items[index][head] = ' '.join(new_words)
-        index += 1
-    write_to_csv('dataset/pre/new-%s.csv' % head, ['A2', 'A4', 'A5'], items)
-
+    with open('dataset/pre/raw.1.csv', 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=all_headers)
+        writer.writeheader()
+        for row_num in range(3, table.nrows - 3):
+            row_value = table.row_values(row_num)
+            row_value[1] = row_value[0]
+            row_value[-1] = datetime.datetime(*xlrd.xldate_as_tuple(
+                row_value[-1], workbook.datemode)).strftime("%m/%d/%Y")
+            writer.writerow(dict(zip(all_headers, row_value[1:])))
 
 
 if __name__ == '__main__':

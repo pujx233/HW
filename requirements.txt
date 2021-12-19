@@ -1,2 +1,6 @@
+tensorflow==2.6.0
+h5py==2.10.0
+bert4keras
 jieba
+sklearn
 xlrd==1.2.0
