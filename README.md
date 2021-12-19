@@ -25,7 +25,7 @@ Micro f1: 0.9028
 ```
 - 运行截图：
 
-  <img src="/Users/zack/Seafile/DSExp/final/assests/result.png" alt="result" />
+  <img src="assests/result.png" alt="result" />
   
   # 思路
   
